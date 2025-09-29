@@ -76,7 +76,7 @@
         </div>
     </div>
 
-    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <script>
         // Game variables
         const canvas = document.getElementById('gameCanvas');
@@ -84,10 +84,10 @@
         const chatBox = document.getElementById('chatBox');
         const chatInput = document.getElementById('chatInput');
         const playersContainer = document.getElementById('playersContainer');
+        const statusDiv = document.getElementById('connectionStatus');
 
         let myId = null;
         let players = new Map();
-        let connections = new Map();
         let localPlayer = {
             x: Math.random() * (canvas.width - 40),
             y: Math.random() * (canvas.height - 40),
@@ -95,14 +95,12 @@
             name: 'Player' + Math.floor(Math.random() * 1000)
         };
 
-        // Add status display
-        const statusDiv = document.createElement('div');
-        statusDiv.id = 'connectionStatus';
-        statusDiv.style.background = '#333';
-        statusDiv.style.padding = '10px';
-        statusDiv.style.marginBottom = '10px';
-        statusDiv.style.border = '2px solid #444';
-        document.getElementById('sidebar').insertBefore(statusDiv, document.getElementById('chatBox'));
+        // Status display functions
+        function updateStatus(message, isError = false) {
+            statusDiv.style.color = isError ? '#ff4444' : '#44ff44';
+            statusDiv.textContent = message;
+            console.log(message);
+        }
 
         function updateStatus(message, isError = false) {
             statusDiv.style.color = isError ? '#ff4444' : '#44ff44';
@@ -110,78 +108,64 @@
             console.log(message);
         }
 
-        // Initialize PeerJS with a room prefix to avoid collisions with other games
-        const roomPrefix = 'barkengine-';
-        const peer = new Peer({
-            debug: 2, // Enable debug logs
-            config: {
-                'iceServers': [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:stun2.l.google.com:19302' },
-                    { urls: 'stun:stun3.l.google.com:19302' },
-                    { urls: 'stun:stun4.l.google.com:19302' }
-                ]
-            }
-        });
-        
-        peer.on('open', (id) => {
-            myId = id;
-            players.set(id, localPlayer);
-            updatePlayersList();
-            updateStatus('Connected to PeerJS server! Your ID: ' + id);
+        // Connect to WebSocket server
+        const socket = io('https://barkengine-server.glitch.me');
+
+        // Connection events
+        socket.on('connect', () => {
+            myId = socket.id;
+            players.set(myId, localPlayer);
+            updateStatus('Connected to game server!');
             
-            // List all peers in our room
-            peer.listAllPeers(peers => {
-                updateStatus('Found ' + peers.length + ' peers');
-                console.log('All peers:', peers);
-                peers.forEach(peerId => {
-                    if (peerId !== id) {
-                        updateStatus('Attempting to connect to peer: ' + peerId);
-                        connectToPeer(peerId);
-                    }
-                });
+            // Send initial player data
+            socket.emit('player_join', {
+                id: myId,
+                player: localPlayer
             });
-
-            // Start periodic peer discovery
-            setInterval(() => {
-                peer.listAllPeers(peers => {
-                    peers.forEach(peerId => {
-                        if (peerId !== id && !connections.has(peerId)) {
-                            updateStatus('Found new peer: ' + peerId);
-                            connectToPeer(peerId);
-                        }
-                    });
-                });
-            }, 5000); // Check for new peers every 5 seconds
         });
 
-        // Handle incoming connections
-        peer.on('connection', (conn) => {
-            updateStatus('Incoming connection from: ' + conn.peer);
-            handleConnection(conn);
+        socket.on('disconnect', () => {
+            updateStatus('Disconnected from server. Trying to reconnect...', true);
         });
 
-        // Add connection error handling
-        peer.on('error', (err) => {
-            updateStatus('PeerJS error: ' + err.type + ' - ' + err.message, true);
-            console.error('PeerJS error:', err);
-            if (err.type === 'peer-unavailable') {
-                const peerId = err.message.split(' ')[1];
-                players.delete(peerId);
-                connections.delete(peerId);
+        socket.on('player_join', (data) => {
+            if (data.id !== myId) {
+                players.set(data.id, data.player);
+                updateStatus(`${data.player.name} joined the game`);
                 updatePlayersList();
             }
         });
 
-        // Add disconnection handling
-        peer.on('disconnected', () => {
-            updateStatus('Disconnected from PeerJS server. Attempting to reconnect...', true);
-            peer.reconnect();
+        socket.on('player_leave', (id) => {
+            if (players.has(id)) {
+                const playerName = players.get(id).name;
+                players.delete(id);
+                updateStatus(`${playerName} left the game`);
+                updatePlayersList();
+            }
         });
 
-        peer.on('close', () => {
-            updateStatus('Connection to PeerJS server closed', true);
+        socket.on('player_list', (playerList) => {
+            Object.entries(playerList).forEach(([id, player]) => {
+                if (id !== myId) {
+                    players.set(id, player);
+                }
+            });
+            updatePlayersList();
+        });
+
+        socket.on('player_move', (data) => {
+            if (data.id !== myId && players.has(data.id)) {
+                const player = players.get(data.id);
+                player.x = data.x;
+                player.y = data.y;
+            }
+        });
+
+        socket.on('chat_message', (data) => {
+            if (data.id !== myId) {
+                addChatMessage(data.id, data.message);
+            }
         });
 
         // Add a share button to let others join
@@ -195,58 +179,7 @@
         };
         document.getElementById('sidebar').appendChild(shareButton);
 
-        function handleConnection(conn) {
-            updateStatus('New connection established with: ' + conn.peer);
-            connections.set(conn.peer, conn);
-            
-            // Send local player data to new connection
-            conn.on('open', () => {
-                updateStatus('Connection opened with: ' + conn.peer);
-                conn.send({
-                    type: 'init',
-                    player: localPlayer
-                });
-            });
 
-            // Handle incoming data
-            conn.on('data', (data) => {
-                switch(data.type) {
-                    case 'init':
-                        updateStatus('Received init data from: ' + conn.peer);
-                        players.set(conn.peer, data.player);
-                        updatePlayersList();
-                        break;
-                    case 'move':
-                        if (players.has(conn.peer)) {
-                            const player = players.get(conn.peer);
-                            player.x = data.x;
-                            player.y = data.y;
-                        }
-                        break;
-                    case 'chat':
-                        addChatMessage(conn.peer, data.message);
-                        break;
-                }
-            });
-
-            conn.on('close', () => {
-                updateStatus('Connection closed with: ' + conn.peer, true);
-                players.delete(conn.peer);
-                connections.delete(conn.peer);
-                updatePlayersList();
-            });
-
-            conn.on('error', (err) => {
-                updateStatus('Connection error with ' + conn.peer + ': ' + err.message, true);
-            });
-        }
-
-        // Connect to a new peer
-        function connectToPeer(peerId) {
-            if (peerId === myId || connections.has(peerId)) return;
-            const conn = peer.connect(peerId);
-            handleConnection(conn);
-        }
 
         // Game loop
         function gameLoop() {
@@ -281,14 +214,10 @@
 
             // Send position update if moved
             if (oldX !== localPlayer.x || oldY !== localPlayer.y) {
-                const moveData = {
-                    type: 'move',
+                socket.emit('player_move', {
+                    id: myId,
                     x: localPlayer.x,
                     y: localPlayer.y
-                };
-                
-                connections.forEach(conn => {
-                    conn.send(moveData);
                 });
             }
         });
@@ -303,12 +232,10 @@
                 const message = chatInput.value.trim();
                 addChatMessage(myId, message);
                 
-                // Send chat message to all peers
-                connections.forEach(conn => {
-                    conn.send({
-                        type: 'chat',
-                        message: message
-                    });
+                // Send chat message to server
+                socket.emit('chat_message', {
+                    id: myId,
+                    message: message
                 });
 
                 chatInput.value = '';
